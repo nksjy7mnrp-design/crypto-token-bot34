@@ -1,46 +1,70 @@
-import { existsSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
 
-const CACHE_FILE = join(process.cwd(), "seen-tokens.json");
-const TTL_MS = 24 * 60 * 60 * 1000;
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "fs";
+import { dirname, resolve } from "path";
+
+const CACHE_FILE = resolve(
+  process.env.SEEN_TOKENS_FILE || "seen-tokens.json"
+);
+
+const TTL_DAYS = Number(process.env.SEEN_TOKEN_TTL_DAYS || 30);
+const TTL_MS = TTL_DAYS * 24 * 60 * 60 * 1000;
 
 type CacheEntry = [string, number];
 
-let seen: Map<string, number>;
+let seen: Map<string, number> | undefined;
 
 function load(): Map<string, number> {
   if (seen) return seen;
+
+  seen = new Map();
   const now = Date.now();
+
   try {
     if (existsSync(CACHE_FILE)) {
-      const raw = JSON.parse(readFileSync(CACHE_FILE, "utf-8")) as unknown;
-      seen = new Map();
+      const raw = JSON.parse(
+        readFileSync(CACHE_FILE, "utf-8")
+      ) as unknown;
+
       if (Array.isArray(raw)) {
         for (const entry of raw) {
-          if (typeof entry === "string") {
-            seen.set(entry.toLowerCase(), now);
-          } else if (Array.isArray(entry) && entry.length === 2) {
-            const [ca, ts] = entry as [string, number];
-            if (now - ts <= TTL_MS) {
-              seen.set(ca.toLowerCase(), ts);
-            }
+          if (
+            Array.isArray(entry) &&
+            entry.length === 2 &&
+            typeof entry[0] === "string" &&
+            typeof entry[1] === "number" &&
+            now - entry[1] <= TTL_MS
+          ) {
+            seen.set(entry[0].toLowerCase(), entry[1]);
           }
         }
       }
-    } else {
-      seen = new Map();
     }
-  } catch {
-    seen = new Map();
+  } catch (error) {
+    console.error("Could not load token cache:", error);
   }
+
   return seen;
 }
 
 function persist(): void {
   try {
+    mkdirSync(dirname(CACHE_FILE), { recursive: true });
+
     const entries: CacheEntry[] = [...load().entries()];
-    writeFileSync(CACHE_FILE, JSON.stringify(entries), "utf-8");
-  } catch {}
+
+    writeFileSync(
+      CACHE_FILE,
+      JSON.stringify(entries),
+      "utf-8"
+    );
+  } catch (error) {
+    console.error("Could not save token cache:", error);
+  }
 }
 
 export function hasSeen(ca: string): boolean {
