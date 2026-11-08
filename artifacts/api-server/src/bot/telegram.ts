@@ -27,11 +27,17 @@ export interface TokenAlert {
   twitterUrl?: string;
 }
 
+export interface SendResult {
+  ok: boolean;
+  error?: string;
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;"); // a quote inside a link used to break the whole message
 }
 
 function buildDexUrl(ca: string, chain: string): string {
@@ -128,27 +134,105 @@ function buildCaption(alert: TokenAlert): string {
   return lines.filter((l) => l !== undefined && l !== null).join("\n");
 }
 
-export async function sendTokenAlert(alert: TokenAlert): Promise<void> {
-  const caption = buildCaption(alert);
+// ─── Helpers for safe sending ────────────────────────────────────────────────
 
-  try {
-    if (alert.imageUrl) {
-      await bot.sendPhoto(channelId!, alert.imageUrl, {
-        caption,
-        parse_mode: "HTML",
-      });
-    } else {
-      await bot.sendMessage(channelId!, caption, { parse_mode: "HTML" });
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+function unescapeHtml(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&");
+}
+
+/** Length Telegram will count for a photo caption (limit is 1024) */
+function captionLength(html: string): number {
+  return unescapeHtml(html.replace(/<[^>]+>/g, "")).length;
+}
+
+/** Same message without any HTML (links written out as "text: url") */
+function toPlainText(html: string): string {
+  const withLinks = html.replace(/<a href="([^"]*)">([^<]*)<\/a>/g, "$2: $1");
+  return unescapeHtml(withLinks.replace(/<[^>]+>/g, ""));
+}
+
+function describeError(err: unknown): { message: string; retryAfter?: number } {
+  const e = err as { message?: string; response?: { body?: unknown } };
+  let body: unknown = e?.response?.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      /* not JSON */
     }
-    logger.info({ ca: alert.ca, symbol: alert.symbol, source: alert.source }, "Alert sent");
-  } catch (err) {
-    if (alert.imageUrl) {
-      try {
-        await bot.sendMessage(channelId!, caption, { parse_mode: "HTML" });
-        logger.info({ ca: alert.ca, symbol: alert.symbol, source: alert.source }, "Alert sent (text fallback)");
-        return;
-      } catch (_) {}
-    }
-    logger.error({ err, ca: alert.ca }, "Failed to send Telegram alert");
   }
+  const b = body as { description?: string; parameters?: { retry_after?: number } } | undefined;
+  return {
+    message: b?.description ?? e?.message ?? String(err),
+    retryAfter: b?.parameters?.retry_after,
+  };
+}
+
+/** If Telegram says "too many messages, retry after N seconds", wait and try again (up to 2 times) */
+async function withRetry<T>(call: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await call();
+    } catch (err) {
+      const { retryAfter } = describeError(err);
+      if (retryAfter !== undefined && retryAfter <= 60 && attempt < 2) {
+        logger.warn({ retryAfter }, "Telegram says slow down — waiting, then retrying");
+        await sleep((retryAfter + 1) * 1000);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Posts one alert to the channel. Returns { ok: true } only if Telegram accepted it,
+ * so the caller knows whether it really reached the channel.
+ */
+export async function sendTokenAlert(alert: TokenAlert): Promise<SendResult> {
+  const caption = buildCaption(alert);
+  const info = { ca: alert.ca, symbol: alert.symbol, source: alert.source };
+  let lastError = "";
+
+  // 1) Photo + caption (only when the caption fits Telegram's 1024-character photo limit)
+  if (alert.imageUrl && captionLength(caption) <= 1024) {
+    try {
+      await withRetry(() =>
+        bot.sendPhoto(channelId!, alert.imageUrl!, { caption, parse_mode: "HTML" }),
+      );
+      logger.info(info, "Alert sent");
+      return { ok: true };
+    } catch (err) {
+      lastError = describeError(err).message;
+      logger.warn({ ...info, error: lastError }, "Photo alert failed — trying text instead");
+    }
+  }
+
+  // 2) Normal text message
+  try {
+    await withRetry(() => bot.sendMessage(channelId!, caption, { parse_mode: "HTML" }));
+    logger.info(info, "Alert sent (text)");
+    return { ok: true };
+  } catch (err) {
+    lastError = describeError(err).message;
+    logger.warn({ ...info, error: lastError }, "Text alert failed — trying plain text");
+  }
+
+  // 3) Last resort: no HTML at all, in case Telegram rejected the formatting
+  try {
+    await withRetry(() => bot.sendMessage(channelId!, toPlainText(caption)));
+    logger.info(info, "Alert sent (plain text)");
+    return { ok: true };
+  } catch (err) {
+    lastError = describeError(err).message;
+  }
+
+  logger.error({ ...info, error: lastError }, "Failed to send Telegram alert");
+  return { ok: false, error: lastError };
 }
