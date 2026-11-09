@@ -1,6 +1,10 @@
 import axios from "axios";
 
-export const TEN_MIN_MS = 10 * 60 * 1000;
+// How old a token's trading pair may be and still count as "new".
+// Default 10 minutes. Set the Railway variable MAX_TOKEN_AGE_MINUTES (e.g. 120) to widen it.
+const configuredMinutes = Number(process.env["MAX_TOKEN_AGE_MINUTES"]);
+export const TEN_MIN_MS =
+  (Number.isFinite(configuredMinutes) && configuredMinutes > 0 ? configuredMinutes : 10) * 60 * 1000;
 
 export interface PairInfo {
   createdAt: number;
