@@ -8,6 +8,7 @@ import { fetchPumpFun } from "./sources/pumpfun";
 import { fetchSunPump } from "./sources/sunpump";
 import { fetchTop100Token } from "./sources/top100token";
 import { fetchGeckoTerminal } from "./sources/geckoterminal";
+import { fetchBirdeye } from "./sources/birdeye";
 
 const INTERVAL_MS = 60_000;
 const SEND_GAP_MS = 4_000; // Telegram allows roughly 20 posts a minute to one channel
@@ -15,7 +16,7 @@ const MAX_SENDS_PER_CYCLE = 10; // 10 posts x 4s keeps one cycle under a minute
 const MAX_ATTEMPTS_PER_TOKEN = 3; // after 3 failed tries a token is dropped
 
 // Same order as the fetch calls below
-const SOURCE_NAMES = ["DexScreener", "pump.fun", "SunPump", "Boosted", "GeckoTerminal"];
+const SOURCE_NAMES = ["DexScreener", "pump.fun", "SunPump", "Boosted", "GeckoTerminal", "Birdeye"];
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -52,6 +53,7 @@ async function cycle(): Promise<void> {
     fetchSunPump(0),
     fetchTop100Token(0),
     fetchGeckoTerminal(0),
+    fetchBirdeye(0),
   ]);
 
   // Work out what is genuinely NEW: not posted before, and not already taken from an earlier source this cycle
