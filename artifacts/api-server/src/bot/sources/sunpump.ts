@@ -9,8 +9,8 @@ const SUNPUMP_URL = "https://api-v2.sunpump.meme/pump-api/token/list";
 // "Newest first". We try these sort names in order and remember the one that works.
 const SORT_OPTIONS = ["tokenCreatedInstant,desc", "createdAt,desc", "createTime,desc"];
 
-// If nothing works at all, only try again every 30 minutes (instead of failing every minute)
-const RETRY_AFTER_MS = 30 * 60 * 1000;
+// If nothing works at all, only try again every 3 hours (instead of failing every minute)
+const RETRY_AFTER_MS = 3 * 60 * 60 * 1000;
 
 const HEADERS = {
   Accept: "application/json",
@@ -95,7 +95,7 @@ export async function fetchSunPump(_sinceMs: number): Promise<TokenAlert[]> {
     if (body === undefined) {
       if (!workingSort) {
         pausedUntil = Date.now() + RETRY_AFTER_MS;
-        logger.warn("SunPump did not answer on the new server — pausing this source for 30 minutes");
+        logger.warn("SunPump did not answer on the new server — pausing this source for 3 hours");
       }
       return [];
     }
@@ -149,4 +149,10 @@ export async function fetchSunPump(_sinceMs: number): Promise<TokenAlert[]> {
     logger.warn({ source: "SunPump", err: String(err) }, "SunPump fetch failed");
     return [];
   }
+}
+
+/** Short status for the log line, e.g. "paused 170 more min" */
+export function sunpumpNote(): string | undefined {
+  const now = Date.now();
+  return now < pausedUntil ? `paused ${Math.ceil((pausedUntil - now) / 60_000)} more min` : undefined;
 }
