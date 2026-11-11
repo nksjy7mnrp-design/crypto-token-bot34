@@ -2,7 +2,7 @@ import axios from "axios";
 import { logger } from "../../lib/logger";
 import { hasSeen } from "../cache";
 import type { TokenAlert } from "../telegram";
-import { isRecent } from "./utils";
+import { TEN_MIN_MS } from "./utils";
 
 // ─── Settings (all optional, set them as Railway Variables) ──────────────────
 //   BIRDEYE_API_KEY       your Birdeye key. Without it this source stays OFF.
@@ -26,6 +26,11 @@ const MAX_META_CALLS = 6; // token-link lookups per check
 const MIN_GAP_MS = 1100; // Birdeye's free plan allows 1 request per second
 
 const HOUR_MS = 60 * 60 * 1000;
+
+// Birdeye is only asked every few minutes, so "new" means "listed since our last check"
+// (and never less than the normal "new token" window)
+const AGE_LIMIT_MS = Math.max(TEN_MIN_MS, (POLL_MINUTES + 1) * 60_000);
+const isFresh = (listedAtMs: number) => Date.now() - listedAtMs <= AGE_LIMIT_MS;
 
 interface ListingItem {
   address?: string;
@@ -103,6 +108,12 @@ function statusOf(err: unknown): number | undefined {
   return (err as { response?: { status?: number } })?.response?.status;
 }
 
+/** The short explanation Birdeye sends back with an error (it never contains your key) */
+function messageOf(err: unknown): string {
+  const data = (err as { response?: { data?: unknown } })?.response?.data as { message?: unknown } | undefined;
+  return typeof data?.message === "string" ? data.message.slice(0, 160) : "";
+}
+
 /** One Birdeye request. The key goes in a header, so it never shows up in a URL or in the logs. */
 async function birdeyeGet(
   path: string,
@@ -155,7 +166,7 @@ async function fetchListings(chain: string): Promise<ListingItem[]> {
     const times = items.map((i) => toMs(i.liquidityAddedAt)).filter((ms) => ms > 0);
     if (items.length < 10 || times.length === 0) break;
     const oldest = Math.min(...times);
-    if (!isRecent(oldest)) break;
+    if (!isFresh(oldest)) break;
     timeTo = Math.floor(oldest / 1000);
   }
   return all;
@@ -216,7 +227,7 @@ async function fetchChain(chain: string): Promise<TokenAlert[]> {
   // Only brand-new tokens we have not posted before
   const fresh = listings.filter((item) => {
     const created = toMs(item.liquidityAddedAt);
-    return !!item.address && created > 0 && isRecent(created) && !hasSeen(item.address);
+    return !!item.address && created > 0 && isFresh(created) && !hasSeen(item.address);
   });
   if (fresh.length === 0) return [];
 
@@ -311,17 +322,23 @@ export async function fetchBirdeye(_sinceMs: number): Promise<TokenAlert[]> {
       results.push(...(await fetchChain(chain)));
     } catch (err) {
       const status = statusOf(err);
+      const said = messageOf(err);
+      const saidText = said ? ` Birdeye says: "${said}".` : "";
       if (status === 401 || status === 403) {
         pausedUntil = now + HOUR_MS;
         logger.warn(
-          `Birdeye refused the request (HTTP ${status}). Check the BIRDEYE_API_KEY variable and that your plan includes "New Listing". Pausing Birdeye for 1 hour.`,
+          `Birdeye refused the request (HTTP ${status}).${saidText} Check the BIRDEYE_API_KEY variable and that your plan includes "New Listing". Pausing Birdeye for 1 hour.`,
         );
         break;
       }
       if (status === 429) {
-        pausedUntil = now + 15 * 60_000;
+        // "compute units used up" lasts for days; "too many per second" passes in minutes
+        const quotaUsedUp = /compute|usage|quota|exceed|limit/i.test(said) && !/second|\brps\b/i.test(said);
+        pausedUntil = now + (quotaUsedUp ? 3 * HOUR_MS : 15 * 60_000);
         logger.warn(
-          "Birdeye says too many requests, or this month's compute units are used up. Pausing Birdeye for 15 minutes.",
+          quotaUsedUp
+            ? `Birdeye says this month's compute units are used up.${saidText} Pausing Birdeye for 3 hours. Check your usage on Birdeye's dashboard, or raise BIRDEYE_POLL_MINUTES / lower BIRDEYE_PAGES.`
+            : `Birdeye says too many requests (or this month's compute units are used up).${saidText} Pausing Birdeye for 15 minutes.`,
         );
         break;
       }
@@ -331,4 +348,13 @@ export async function fetchBirdeye(_sinceMs: number): Promise<TokenAlert[]> {
 
   logger.info({ source: "Birdeye", found: results.length }, "Birdeye fetch complete");
   return results;
+}
+
+/** Short status for the log line, e.g. "next check in 8 min" */
+export function birdeyeNote(): string | undefined {
+  if (!API_KEY) return "off - no API key";
+  const now = Date.now();
+  if (now < pausedUntil) return `paused ${Math.ceil((pausedUntil - now) / 60_000)} more min`;
+  if (nextRunAt === 0) return undefined;
+  return `next check in ${Math.max(0, Math.ceil((nextRunAt - now) / 60_000))} min`;
 }
